@@ -1,6 +1,14 @@
 import { load } from 'cheerio'
 import type { Entry } from './types.ts'
 import { TextWriter } from 'zipjs'
+import { SEP as POSIX_SEP } from 'std/path/posix/mod.ts'
+import { SEP_PATTERN as WIN_SEP_PATTERN } from 'std/path/windows/mod.ts'
+import { IS_COMPILED } from './cli.ts'
+import { fromExcelCol, toExcelCol } from './columnLetters.ts'
+
+export function posixifyPath(path: string) {
+	return path.replaceAll(new RegExp(WIN_SEP_PATTERN.source, 'g'), POSIX_SEP)
+}
 
 export function excelWidthToEmus(width: number) {
 	// https://stackoverflow.com/a/17930457/8318731
@@ -83,29 +91,31 @@ export function expandRange(start: string, end: string) {
 }
 
 export function colIndexToLetter(colIndex: number) {
-	// TODO: handle AA+
-	return String.fromCodePoint('A'.codePointAt(0)! + colIndex)
+	return toExcelCol(colIndex + 1)
 }
 
 export function letterToColIndex(letter: string) {
-	// TODO: handle AA+
-	return letter.codePointAt(0)! - 'A'.codePointAt(0)!
+	return fromExcelCol(letter) - 1
 }
 
 export function toRelsPath(path: string) {
-	return path.replace(/([^/]+)\.xml$/, '_rels/$1.xml.rels')
+	return path.replace(/([^/\\]+)\.xml$/, '_rels/$1.xml.rels')
 }
 
 export async function get$(entry: Entry) {
 	const tw = new TextWriter()
-	const cellImagesContent = await entry.getData(tw)
+	const cellImagesContent = await entry.getData(tw, { useWebWorkers: !IS_COMPILED })
 
 	return load(cellImagesContent, { xml: true })
 }
 
 export function toDefaultOutputFilePath(inputFilePath: string) {
+	const replacement = `_with_image_file_names_${
+		new Date().toISOString().replace(/\..+$/, '').replaceAll(/\D+/g, '')
+	}.xlsx` as const
+
 	return inputFilePath.replace(
 		/(\.xlsx)?$/,
-		`_with_image_file_names_${new Date().toISOString().replace(/\..+$/, '').replaceAll(/\D+/g, '')}.xlsx`,
-	)
+		replacement,
+	) as `${string}${typeof replacement}`
 }

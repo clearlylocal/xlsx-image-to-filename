@@ -1,28 +1,35 @@
-import { dirname, join } from 'std/path/mod.ts'
+import { dirname, join } from 'std/path/posix/mod.ts'
 import { BlobReader, BlobWriter, ZipReader, ZipWriter } from 'zipjs'
 import {
-	excelWidthToEmus,
 	expandRange,
 	get$,
 	getRightMostRecord,
+	posixifyPath,
 	ptsToEmus,
 	toCellReferences,
 	toRelsPath,
 } from './utils.ts'
-import type { Entry } from './types.ts'
+import type { Entry, Params } from './types.ts'
 import { colors } from 'cliffy/ansi/colors.ts'
 import type { Cheerio, Element } from 'cheerio'
 import { letterToColIndex } from './utils.ts'
+import { IS_COMPILED } from './cli.ts'
 
-export async function convert(fileBytes: Uint8Array, outputCol?: string) {
-	outputCol ??= 'O'
+export async function convert(fileBytes: Uint8Array, { column, prefix, filePath }: Params) {
+	const outputCol = column ??= 'O'
+	prefix ??= ''
+
+	prefix = prefix.replace('{{FILE_NAME}}', encodeURIComponent(filePath.split('/').at(-1)!.split('.').at(0)!))
+	if (prefix && prefix.includes('/') && !prefix.endsWith('/')) prefix += '/'
 
 	const warnings: string[] = []
 
 	const blob = new Blob([fileBytes])
 
 	const blobReader = new BlobReader(blob)
-	const zipReader = new ZipReader(blobReader)
+	const zipReader = new ZipReader(blobReader, {
+		useWebWorkers: !IS_COMPILED,
+	})
 
 	const blobWriter = new BlobWriter()
 	const zipWriter = new ZipWriter(blobWriter)
@@ -30,7 +37,7 @@ export async function convert(fileBytes: Uint8Array, outputCol?: string) {
 	const entries = await zipReader.getEntries() as Entry[]
 
 	function get$FromPath(path: string) {
-		const entry = entries.find((x) => x.filename === path)!
+		const entry = entries.find((x) => posixifyPath(x.filename) === posixifyPath(path))!
 
 		return get$(entry)
 	}
@@ -151,7 +158,7 @@ export async function convert(fileBytes: Uint8Array, outputCol?: string) {
 
 			// floating images
 
-			const relsEntry = entries.find((x) => x.filename === relsFilePath)
+			const relsEntry = entries.find((x) => posixifyPath(x.filename) === posixifyPath(relsFilePath))
 
 			if (relsEntry) {
 				const colBoundaries: number[] = [0]
@@ -239,34 +246,36 @@ export async function convert(fileBytes: Uint8Array, outputCol?: string) {
 				const cellSelector = `c[r="${outputCellRef}"]`
 				let $cell = $row.find(cellSelector)
 
-				if (!$cell.length) {
+				append: if (!$cell.length) {
 					const $toAppend = $(`<c r="${outputCellRef}"></c>`) as Cheerio<Element>
-					let appended = false
 
 					for (const c of $row.find('c')) {
 						const $c = $(c)
 
 						if (letterToColIndex($c.attr('r')!.match(/\D+/)![0]) > letterToColIndex(outputCol)) {
 							$toAppend.insertBefore($c)
-							appended = true
+							break append
 						}
 					}
 
-					if (!appended) {
-						$row.append($toAppend)
-					}
+					$row.append($toAppend)
 				}
 
 				$cell = $row.find(cellSelector)
 
+				// for (const attr of $cell.prop('attributes')) {
+				// 	$cell.removeAttr(attr.name)
+				// }
+
 				$cell.attr('t', 'str')
+
 				$cell.html('<v></v>')
-				$cell.find('v').text(record.fileName)
+				$cell.find('v').text(`${prefix}${record.fileName}`)
 			}
 
 			// write to ZIP
 			pathsAlreadyWritten.push(sheetEntry.filename)
-			zipWriter.add(sheetEntry.filename, new Blob([$.xml()]).stream())
+			zipWriter.add(sheetEntry.filename, new Blob([$.xml()]).stream(), { useWebWorkers: !IS_COMPILED })
 		}
 	}
 
@@ -275,7 +284,13 @@ export async function convert(fileBytes: Uint8Array, outputCol?: string) {
 			continue
 		}
 
-		zipWriter.add(entry.filename, (await entry.getData(new BlobWriter())).stream())
+		zipWriter.add(
+			entry.filename,
+			(await entry.getData(new BlobWriter(), { useWebWorkers: !IS_COMPILED })).stream(),
+			{
+				useWebWorkers: !IS_COMPILED,
+			},
+		)
 	}
 
 	if (warnings.length) {

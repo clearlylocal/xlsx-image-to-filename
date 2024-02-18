@@ -22,7 +22,6 @@ export function toExcelCol(n: number) {
 
 /** @returns The 1-indexed Excel column number */
 export function fromExcelCol(letter: string) {
-	// return reduce(lambda r, x: r * 26 + x + 1, map(uppercaseAlpha.index, chars), 0)
 	return [...letter].map((l) => uppercaseAlpha.indexOf(l)).reduce((acc, cur) => {
 		return acc * 26 + cur + 1
 	}, 0)

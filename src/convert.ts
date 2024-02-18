@@ -1,12 +1,16 @@
-import { dirname, join } from 'std/path/posix/mod.ts'
+import { dirname, join as posixJoin } from 'std/path/posix/mod.ts'
 import { BlobReader, BlobWriter, ZipReader, ZipWriter } from 'zipjs'
 import {
+	dateForFilePath,
+	dateTimeForFilePath,
 	expandRange,
 	get$,
 	getRightMostRecord,
+	normalizePathForCurrentOs,
 	posixifyPath,
 	ptsToEmus,
 	toCellReferences,
+	toDefaultOutputFilePath,
 	toRelsPath,
 } from './utils.ts'
 import type { Entry, Params } from './types.ts'
@@ -14,13 +18,43 @@ import { colors } from 'cliffy/ansi/colors.ts'
 import type { Cheerio, Element } from 'cheerio'
 import { letterToColIndex } from './utils.ts'
 import { IS_COMPILED } from './cli.ts'
+import { join, SEP } from 'std/path/mod.ts'
 
-export async function convert(fileBytes: Uint8Array, { column, prefix, filePath }: Params) {
+export async function* convertAll(files: Uint8Array[], params: Params) {
+	for (const file of files) {
+		yield convert(file, params)
+	}
+}
+
+type ImageReference = {
+	cellReference: string
+	kind: 'floating' | 'wps'
+	fileName: string
+}
+
+class EntryNotFoundError extends Error {}
+
+export async function convert(fileBytes: Uint8Array, { column, prefix, filePath, outPath }: Params) {
 	const outputCol = column ??= 'O'
 	prefix ??= ''
 
-	prefix = prefix.replace('{{FILE_NAME}}', encodeURIComponent(filePath.split('/').at(-1)!.split('.').at(0)!))
+	const fileName = filePath.split(SEP).at(-1)!.split('.').at(0)!
+
+	prefix = prefix.replaceAll('{{FILE_NAME}}', encodeURIComponent(fileName))
 	if (prefix && prefix.includes('/') && !prefix.endsWith('/')) prefix += '/'
+
+	outPath ??= toDefaultOutputFilePath(filePath)
+
+	outPath = normalizePathForCurrentOs(outPath)
+
+	outPath = outPath
+		.replaceAll('{{DATE}}', dateForFilePath())
+		.replaceAll('{{DATE_TIME}}', dateTimeForFilePath())
+		.replaceAll('{{FILE_NAME}}', fileName)
+
+	if (!outPath.split(SEP).includes(fileName)) {
+		outPath = join(outPath, `${fileName}.xlsx`)
+	}
 
 	const warnings: string[] = []
 
@@ -37,7 +71,10 @@ export async function convert(fileBytes: Uint8Array, { column, prefix, filePath 
 	const entries = await zipReader.getEntries() as Entry[]
 
 	function get$FromPath(path: string) {
-		const entry = entries.find((x) => posixifyPath(x.filename) === posixifyPath(path))!
+		const entry = entries.find((x) => posixifyPath(x.filename) === posixifyPath(path))
+		if (!entry) {
+			throw new EntryNotFoundError(`Entry for path ${path} not found`)
+		}
 
 		return get$(entry)
 	}
@@ -45,59 +82,57 @@ export async function convert(fileBytes: Uint8Array, { column, prefix, filePath 
 	const cellImagesPath = 'xl/cellimages.xml'
 	const cellImageRelsPath = toRelsPath(cellImagesPath)
 
+	const hasWpsCellImages = entries.some((x) => posixifyPath(x.filename) === posixifyPath(cellImagesPath))
+
 	const pathsAlreadyWritten: string[] = []
 
 	{
-		const _ridsToWpsIds = new Map<string, string[]>()
-
-		{
-			const $ = await get$FromPath(cellImagesPath)
-			const cellImages = $('etc\\:cellImage')
-
-			for (const img of cellImages) {
-				const $img = $(img)
-				const name = $img.find('xdr\\:cNvPr').attr('name')
-				const rid = $img.find('xdr\\:blipFill a\\:blip').attr('r:embed')
-
-				if (!rid || !name) continue
-
-				const wpsIds = _ridsToWpsIds.get(rid) ?? []
-				wpsIds.push(name)
-
-				_ridsToWpsIds.set(rid, wpsIds)
-			}
-		}
-
 		const wpsIdsToImageFileNames = new Map<string, string>()
 
-		{
-			const $ = await get$FromPath(cellImageRelsPath)
-			const imageRels = $(
-				'Relationship[Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"]',
-			)
+		if (hasWpsCellImages) {
+			const _ridsToWpsIds = new Map<string, string[]>()
 
-			for (const rel of imageRels) {
-				const $rel = $(rel)
+			{
+				const $ = await get$FromPath(cellImagesPath)
+				const cellImages = $('etc\\:cellImage')
 
-				const rid = $rel.attr('Id')
+				for (const img of cellImages) {
+					const $img = $(img)
+					const name = $img.find('xdr\\:cNvPr').attr('name')
+					const rid = $img.find('xdr\\:blipFill a\\:blip').attr('r:embed')
 
-				if (!rid) continue
+					if (!rid || !name) continue
 
-				const wpsIds = _ridsToWpsIds.get(rid)
-				const target = $rel.attr('Target')?.split('/').at(-1)
+					const wpsIds = _ridsToWpsIds.get(rid) ?? []
+					wpsIds.push(name)
 
-				if (!wpsIds || !target) continue
-
-				for (const wpsId of wpsIds) {
-					wpsIdsToImageFileNames.set(wpsId, target)
+					_ridsToWpsIds.set(rid, wpsIds)
 				}
 			}
-		}
 
-		type ImageReference = {
-			cellReference: string
-			kind: 'floating' | 'wps'
-			fileName: string
+			{
+				const $ = await get$FromPath(cellImageRelsPath)
+				const imageRels = $(
+					'Relationship[Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"]',
+				)
+
+				for (const rel of imageRels) {
+					const $rel = $(rel)
+
+					const rid = $rel.attr('Id')
+
+					if (!rid) continue
+
+					const wpsIds = _ridsToWpsIds.get(rid)
+					const target = $rel.attr('Target')?.split('/').at(-1)
+
+					if (!wpsIds || !target) continue
+
+					for (const wpsId of wpsIds) {
+						wpsIdsToImageFileNames.set(wpsId, target)
+					}
+				}
+			}
 		}
 
 		const sheetEntries = entries.filter((x) => /^xl\/worksheets\/\w+.xml$/.test(x.filename))
@@ -191,7 +226,7 @@ export async function convert(fileBytes: Uint8Array, { column, prefix, filePath 
 					).attr('Target')
 
 					if (drawingsPathRelative) {
-						const drawingsPath = join(dirname(relsFilePath), '..', drawingsPathRelative)
+						const drawingsPath = posixJoin(dirname(relsFilePath), '..', drawingsPathRelative)
 						const drawingRelsPath = toRelsPath(drawingsPath)
 
 						const $ = await get$FromPath(drawingsPath)
@@ -232,11 +267,9 @@ export async function convert(fileBytes: Uint8Array, { column, prefix, filePath 
 			}
 
 			// write rows into XML in column O
-			const byRow = Object.groupBy(imageReferences, (x) => x.cellReference.match(/\d+/)![0])
+			const imageReferencesByRow = Object.groupBy(imageReferences, (x) => x.cellReference.match(/\d+/)![0])
 
-			for (
-				const [_row, _records] of Object.entries(byRow)
-			) {
+			for (const [_row, _records] of Object.entries(imageReferencesByRow)) {
 				const rowNum = Number(_row)
 				const record = getRightMostRecord(_records!)
 				if (!record) continue
@@ -299,5 +332,8 @@ export async function convert(fileBytes: Uint8Array, { column, prefix, filePath 
 		}
 	}
 
-	return new Uint8Array(await (await zipWriter.close()).arrayBuffer())
+	return {
+		path: outPath,
+		bytes: new Uint8Array(await (await zipWriter.close()).arrayBuffer()),
+	}
 }

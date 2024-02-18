@@ -1,13 +1,20 @@
 import { load } from 'cheerio'
 import type { Entry } from './types.ts'
 import { TextWriter } from 'zipjs'
-import { SEP as POSIX_SEP } from 'std/path/posix/mod.ts'
-import { SEP_PATTERN as WIN_SEP_PATTERN } from 'std/path/windows/mod.ts'
+import { SEP as POSIX_SEP, SEP_PATTERN as POSIX_SEP_PATTERN } from 'std/path/posix/mod.ts'
+import { SEP_PATTERN as MS_SEP_PATTERN } from 'std/path/windows/mod.ts'
+import { SEP as CURRENT_OS_SEP } from 'std/path/mod.ts'
 import { IS_COMPILED } from './cli.ts'
 import { fromExcelCol, toExcelCol } from './columnLetters.ts'
+import 'temporal'
+
+export function normalizePathForCurrentOs(path: string) {
+	return path
+		.replaceAll(new RegExp(`(?:${MS_SEP_PATTERN.source}|${POSIX_SEP_PATTERN.source})`, 'g'), CURRENT_OS_SEP)
+}
 
 export function posixifyPath(path: string) {
-	return path.replaceAll(new RegExp(WIN_SEP_PATTERN.source, 'g'), POSIX_SEP)
+	return path.replaceAll(new RegExp(MS_SEP_PATTERN.source, 'g'), POSIX_SEP)
 }
 
 export function excelWidthToEmus(width: number) {
@@ -104,15 +111,21 @@ export function toRelsPath(path: string) {
 
 export async function get$(entry: Entry) {
 	const tw = new TextWriter()
-	const cellImagesContent = await entry.getData(tw, { useWebWorkers: !IS_COMPILED })
+	const xml = await entry.getData(tw, { useWebWorkers: !IS_COMPILED })
 
-	return load(cellImagesContent, { xml: true })
+	return load(xml, { xml: true })
+}
+
+export function dateForFilePath(date = Temporal.Now.plainDateISO()) {
+	return date.toString().replaceAll(/\D+/g, '')
+}
+
+export function dateTimeForFilePath(dateTime = Temporal.Now.plainDateTimeISO()) {
+	return dateTime.toString().replaceAll(/\D+/g, '')
 }
 
 export function toDefaultOutputFilePath(inputFilePath: string) {
-	const replacement = `_with_image_file_names_${
-		new Date().toISOString().replace(/\..+$/, '').replaceAll(/\D+/g, '')
-	}.xlsx` as const
+	const replacement = `_with_image_file_names_${dateTimeForFilePath()}.xlsx` as const
 
 	return inputFilePath.replace(
 		/(\.xlsx)?$/,

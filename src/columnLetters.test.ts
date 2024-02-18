@@ -17,4 +17,10 @@ Deno.test('excel col letters', async (t) => {
 		await t.step('fromExcelCol("ZZ") == 702', () => assertEquals(fromExcelCol('ZZ'), 702))
 		await t.step('fromExcelCol("AAA") == 703', () => assertEquals(fromExcelCol('AAA'), 703))
 	})
+
+	await t.step('round-trip', () => {
+		for (let i = 1; i < 10_000; ++i) {
+			assertEquals(fromExcelCol(toExcelCol(i)), i)
+		}
+	})
 })
